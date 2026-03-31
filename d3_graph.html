@@ -100,7 +100,8 @@ function updateGraphWithZoom(k) {
     const nodeSet = new Set(nodes.map(d => d.id));
 
     const links = fullData.links.filter(d =>
-        nodeSet.has(d.source) && nodeSet.has(d.target)
+        nodeSet.has(d.source.id || d.source) &&
+        nodeSet.has(d.target.id || d.target)
     );
 
     // ===============================
