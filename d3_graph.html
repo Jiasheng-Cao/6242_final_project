@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Paper Citation Graph</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+
+<body>
+
+<h2>Paper Citation Visualization</h2>
+
+Start Year:
+<select id="startYear"></select>
+
+End Year:
+<select id="endYear"></select>
+
+<button onclick="updateGraph()">Update</button>
+
+<svg width="1000" height="700"></svg>
+
+<script>
+
+const svg = d3.select("svg");
+const width = +svg.attr("width");
+const height = +svg.attr("height");
+
+// 🔥 所有图放这里（支持zoom）
+const g = svg.append("g");
+
+let fullData;
+let currentZoom = 1;
+
+// ===============================
+// zoom（核心🔥）
+// ===============================
+const zoom = d3.zoom()
+    .scaleExtent([0.5, 5])
+    .on("zoom", (event) => {
+        g.attr("transform", event.transform);
+        updateGraphWithZoom(event.transform.k);
+    });
+
+svg.call(zoom);
+
+// ===============================
+// 加载数据
+// ===============================
+d3.json("graph.json").then(data => {
+    fullData = data;
+
+    const years = [...new Set(data.nodes.map(d => d.year))].sort();
+
+    const startSelect = d3.select("#startYear");
+    const endSelect = d3.select("#endYear");
+
+    years.forEach(y => {
+        startSelect.append("option").text(y).attr("value", y);
+        endSelect.append("option").text(y).attr("value", y);
+    });
+
+    updateGraph();
+});
+
+// ===============================
+function updateGraph() {
+    updateGraphWithZoom(currentZoom);
+}
+
+// ===============================
+// 🔥 核心：根据zoom动态更新
+// ===============================
+let simulation;
+let nodeSelection;
+let linkSelection;
+function updateGraphWithZoom(k) {
+
+    currentZoom = k;
+
+    const start = +document.getElementById("startYear").value;
+    const end = +document.getElementById("endYear").value;
+
+    let nodes = fullData.nodes.filter(d => d.year >= start && d.year <= end);
+
+    // ===============================
+    // 节点数量控制（保持你原逻辑）
+    // ===============================
+    let maxNodes;
+
+    if (k < 1) maxNodes = 100;
+    else if (k < 2) maxNodes = 300;
+    else if (k < 3) maxNodes = 700;
+    else maxNodes = 1500;
+
+    nodes = nodes
+        .sort((a, b) => b.citation_count - a.citation_count)
+        .slice(0, maxNodes);
+
+    const nodeSet = new Set(nodes.map(d => d.id));
+
+    const links = fullData.links.filter(d =>
+        nodeSet.has(d.source) && nodeSet.has(d.target)
+    );
+
+    // ===============================
+    // scale（不变）
+    // ===============================
+    const maxCitation = d3.max(nodes, d => d.citation_count) || 1;
+
+    const sizeScale = d3.scaleSqrt()
+        .domain([0, maxCitation])
+        .range([3, 15]);
+
+    const colorScale = d3.scaleSequential(d3.interpolateBlues)
+        .domain([0, maxCitation]);
+
+    // ===============================
+    // 🔥 DOM JOIN（核心优化，不再 remove）
+    // ===============================
+    linkSelection = g.selectAll("line")
+        .data(links, d => d.source + "-" + d.target);
+
+    linkSelection.exit().remove();
+
+    const linkEnter = linkSelection.enter()
+        .append("line")
+        .attr("stroke", "#aaa")
+        .attr("stroke-width", 1);
+
+    linkSelection = linkEnter.merge(linkSelection);
+
+    // ------------------------------
+
+    nodeSelection = g.selectAll("circle")
+        .data(nodes, d => d.id);
+
+    nodeSelection.exit().remove();
+
+    const nodeEnter = nodeSelection.enter()
+        .append("circle")
+        .attr("r", d => sizeScale(d.citation_count))
+        .attr("fill", d => colorScale(d.citation_count))
+        .call(d3.drag()
+            .on("start", dragstarted)
+            .on("drag", dragged)
+            .on("end", dragended)
+        );
+
+    nodeEnter.append("title")
+        .text(d => `${d.id}\nYear: ${d.year}\nCitations: ${d.citation_count}`);
+
+    nodeSelection = nodeEnter.merge(nodeSelection);
+
+    // ===============================
+    // 🔥 simulation复用（关键）
+    // ===============================
+    if (!simulation) {
+        simulation = d3.forceSimulation(nodes)
+            .force("link", d3.forceLink(links).id(d => d.id).distance(60))
+            .force("charge", d3.forceManyBody().strength(-50))
+            .force("center", d3.forceCenter(width / 2, height / 2))
+            .force("x", d3.forceX(width / 2).strength(0.05))
+            .force("y", d3.forceY(height / 2).strength(0.05))
+            .force("collision", d3.forceCollide().radius(d => sizeScale(d.citation_count) + 2))
+            .alphaDecay(0.06)   // 🔥更快收敛（不影响视觉）
+            .velocityDecay(0.4);
+
+        simulation.on("tick", ticked);
+    } else {
+        // 🔥 不重建，只更新数据
+        simulation.nodes(nodes);
+        simulation.force("link").links(links);
+        simulation.alpha(0.5).restart();
+    }
+
+    function ticked() {
+        linkSelection
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+
+        nodeSelection
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+    }
+
+    function dragstarted(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+    }
+
+    function dragged(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+    }
+
+    function dragended(event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+    }
+}
+
+</script>
+
+</body>
+</html>
