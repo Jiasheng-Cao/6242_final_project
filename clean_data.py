@@ -10,6 +10,15 @@ df = pd.read_csv("openalex_papers.csv")
 print("Loaded openalex_papers.csv")
 print("Total rows:", len(df))
 
+# ===============================
+# 🔥 删除含 NaN 的条目（关键新增）
+# ===============================
+df = df.dropna(subset=["paper_id", "year", "citation_count"])
+
+# 👉 可选：title 也清掉（强烈推荐）
+df["title"] = df["title"].fillna("")
+
+print("After dropna:", len(df))
 
 # ===============================
 # Step 2: 清洗 paper_id

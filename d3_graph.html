@@ -149,7 +149,7 @@ function updateGraphWithZoom(k) {
         );
 
     nodeEnter.append("title")
-        .text(d => `${d.id}\nYear: ${d.year}\nCitations: ${d.citation_count}`);
+        .text(d => `${d.title || d.id}\nYear: ${d.year}\nCitations: ${d.citation_count}`);
 
     nodeSelection = nodeEnter.merge(nodeSelection);
 

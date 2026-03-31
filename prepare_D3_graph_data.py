@@ -18,11 +18,17 @@ year_map = {}
 for _, row in df.iterrows():
     pid = row["paper_id"]
     year = row["year"]
+    title = row["title"]
+    if pd.isna(title):
+        title = ""
+    else:
+        title = str(title)
 
     year_map[pid] = year
 
     nodes.append({
         "id": pid,
+        "title": title,
         "year": int(year),
         "citation_count": int(row["citation_count"])
     })

@@ -10,7 +10,7 @@ import random
 BASE_URL = "https://api.openalex.org/works"
 CS_CONCEPT = "C41008148"
 
-TOTAL_PAPERS = 1000
+TOTAL_PAPERS = 20000
 PER_PAGE = 200
 
 HEADERS = {
