@@ -39,8 +39,62 @@
             display: none;
         }
         #cluster-legend strong { font-size: 13px; color: #555; margin-right: 12px; }
-        .legend-item { display: inline-flex; align-items: center; margin-right: 14px; font-size: 12px; }
+        .legend-item { display: inline-flex; align-items: center; margin-right: 8px; margin-bottom: 2px; font-size: 12px; }
         .legend-swatch { width: 12px; height: 12px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; border: 1px solid rgba(0,0,0,0.15); }
+        button.legend-item {
+            background: transparent; border: 1px solid transparent;
+            font: inherit; color: inherit; padding: 3px 7px;
+            border-radius: 4px; cursor: pointer;
+        }
+        button.legend-item:hover { background: #eef5fd; border-color: #cfe0f0; color: #2980b9; }
+        button.legend-item.active { background: #e3eefa; border-color: #a4c5e6; color: #2c3e50; }
+
+        #cluster-panel {
+            position: fixed; top: 90px; right: 30px; width: 380px;
+            max-height: calc(100vh - 120px);
+            background: white; border-radius: 8px;
+            box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+            border: 1px solid #e0e0e0; z-index: 20;
+            display: none; flex-direction: column; overflow: hidden;
+        }
+        #cluster-panel.open { display: flex; }
+        #cluster-panel .panel-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 12px 16px; border-bottom: 1px solid #eee;
+        }
+        #cluster-panel .panel-title {
+            display: flex; align-items: center; gap: 8px;
+            font-weight: 600; color: #2c3e50; font-size: 14px;
+        }
+        #cluster-panel .panel-swatch {
+            width: 14px; height: 14px; border-radius: 50%;
+            border: 1px solid rgba(0,0,0,0.15); flex-shrink: 0;
+        }
+        #cluster-panel .panel-close {
+            background: none; border: none; color: #888; font-size: 22px;
+            cursor: pointer; padding: 0 4px; line-height: 1; font-weight: bold;
+        }
+        #cluster-panel .panel-close:hover { color: #333; background: none; }
+        #cluster-panel .panel-slider-row {
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 16px; font-size: 12px; color: #555;
+            border-bottom: 1px solid #eee; background: #fafbfc;
+        }
+        #cluster-panel .panel-slider-row input[type=range] { flex: 1; margin: 0 4px; }
+        #cluster-panel .panel-slider-row strong { color: #2c3e50; min-width: 36px; text-align: center; }
+        #cluster-panel .panel-range-hint { color: #999; font-size: 11px; white-space: nowrap; }
+        #cluster-panel .panel-list {
+            overflow-y: auto; flex: 1; font-size: 12px;
+        }
+        #cluster-panel .panel-row {
+            display: flex; gap: 8px; padding: 6px 16px;
+            border-bottom: 1px solid #f4f4f4; cursor: pointer;
+        }
+        #cluster-panel .panel-row:hover { background: #f7faff; }
+        #cluster-panel .row-year { color: #888; font-variant-numeric: tabular-nums; min-width: 38px; flex-shrink: 0; }
+        #cluster-panel .row-title { flex: 1; color: #2c3e50; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #cluster-panel .row-cites { color: #999; min-width: 50px; text-align: right; flex-shrink: 0; }
+        #cluster-panel .panel-footer { padding: 8px 16px; font-size: 11px; color: #888; border-top: 1px solid #eee; background: #fafbfc; }
 
         #tooltip {
             position: absolute; display: none; min-width: 200px; background: rgba(255, 255, 255, 0.95);
@@ -102,6 +156,8 @@
 
 <div id="cluster-legend"></div>
 
+<div id="cluster-panel"></div>
+
 <div id="tooltip">
     <div class="tooltip-title"></div>
     <div class="tooltip-info"></div>
@@ -119,6 +175,14 @@
         box-shadow: 0 2px 10px rgba(0,0,0,0.05);
     ">
         <h3>Node Analysis</h3>
+
+        <div id="paperInfo" style="
+            font-size:13px; line-height:1.55; color:#444;
+            background:#fafbfc; border:1px solid #eee; border-radius:6px;
+            padding:10px 12px; margin-bottom:16px;
+        ">
+            <span style="color:#999;">Click a node to see details.</span>
+        </div>
 
         <div>
             <h4>Internal Citations</h4>
@@ -175,6 +239,7 @@ let sizeScale;
 let clusterMode = false;
 let clusterMap = {};       // nodeId -> cluster index
 let clusterOtherIdx = -1;  // label reserved for the "Other" (small-community) bucket; -1 if unused
+let activeClusterFilter = null;  // { cluster, maxYear, minYear } when inspector panel is open
 // Louvain may return any number of communities, so keep a big palette
 const CLUSTER_COLORS = [...d3.schemeTableau10, ...d3.schemeSet3, ...d3.schemePaired];
 const OTHER_COLOR = "#cfd8dc";
@@ -390,6 +455,8 @@ function applyNodeColors() {
     } else {
         nodeSelection.attr("fill", d => colorScale(d.citation_count));
     }
+    // If the cluster inspector is open, re-dim non-matching nodes on top of the fill
+    if (activeClusterFilter) applyClusterFilter();
 }
 
 // ─── Community Detection (Louvain) ──────────────────────────────────────────
@@ -491,28 +558,168 @@ function clearClusterState() {
     clusterMode = false;
     clusterMap = {};
     clusterOtherIdx = -1;
+    activeClusterFilter = null;
     document.getElementById("cluster-status").textContent = "";
     document.getElementById("resetClusterBtn").style.display = "none";
     document.getElementById("cluster-legend").style.display = "none";
+    document.getElementById("cluster-panel").classList.remove("open");
 }
 
 function renderClusterLegend(processed) {
     const legend = document.getElementById("cluster-legend");
-    let html = "<strong>Louvain Communities:</strong>";
+    let html = "<strong>Louvain Communities:</strong> <span style=\"font-size:11px;color:#999;\">(click to inspect)</span> ";
     for (let c = 0; c < processed.numMain; c++) {
-        html += `<span class="legend-item">
+        html += `<button class="legend-item" onclick="openClusterPanel(${c})" title="Click to open cluster inspector">
             <span class="legend-swatch" style="background:${CLUSTER_COLORS[c % CLUSTER_COLORS.length]}"></span>
             C${c + 1} <span style="color:#999;margin-left:4px;">(${processed.sizes[c]})</span>
-        </span>`;
+        </button>`;
     }
     if (processed.otherNodes > 0) {
-        html += `<span class="legend-item" title="${processed.otherGroups} tiny communities merged into one gray bucket">
+        html += `<button class="legend-item" onclick="openClusterPanel(${processed.otherIdx})"
+                 title="${processed.otherGroups} tiny communities merged into one bucket — click to inspect">
             <span class="legend-swatch" style="background:${OTHER_COLOR}"></span>
             Other <span style="color:#999;margin-left:4px;">(${processed.otherNodes} nodes, ${processed.otherGroups} groups)</span>
-        </span>`;
+        </button>`;
     }
     legend.innerHTML = html;
     legend.style.display = "block";
+    // Keep the active button highlighted if a cluster panel is already open
+    if (activeClusterFilter) markActiveLegendButton(activeClusterFilter.cluster);
+}
+
+function markActiveLegendButton(cluster) {
+    const legend = document.getElementById("cluster-legend");
+    legend.querySelectorAll("button.legend-item").forEach(btn => btn.classList.remove("active"));
+    const buttons = legend.querySelectorAll("button.legend-item");
+    if (cluster >= 0 && buttons[cluster]) buttons[cluster].classList.add("active");
+}
+
+// ─── Cluster Inspector Panel ────────────────────────────────────────────────
+
+function openClusterPanel(cluster) {
+    if (!clusterMode) return;
+    const papers = fullData.nodes.filter(n => clusterMap[n.id] === cluster);
+    if (papers.length === 0) return;
+
+    const years = papers.map(p => p.year);
+    const minYear = Math.min(...years);
+    const maxYear = Math.max(...years);
+
+    activeClusterFilter = { cluster, minYear, maxYear, currentYear: maxYear };
+
+    const color = cluster === clusterOtherIdx
+        ? OTHER_COLOR
+        : CLUSTER_COLORS[cluster % CLUSTER_COLORS.length];
+    const label = cluster === clusterOtherIdx ? "Other" : `C${cluster + 1}`;
+
+    const panel = document.getElementById("cluster-panel");
+    panel.innerHTML = `
+        <div class="panel-header">
+            <span class="panel-title">
+                <span class="panel-swatch" style="background:${color}"></span>
+                Cluster ${label}
+                <span style="color:#888;font-weight:normal;margin-left:4px;">(${papers.length} papers)</span>
+            </span>
+            <button class="panel-close" onclick="closeClusterPanel()" title="Close">×</button>
+        </div>
+        <div class="panel-slider-row">
+            Show up to
+            <strong id="clusterYearLabel">${maxYear}</strong>
+            <input type="range" id="clusterYearSlider"
+                   min="${minYear}" max="${maxYear}" value="${maxYear}" step="1"
+                   oninput="updateClusterYearFilter(+this.value)">
+            <span class="panel-range-hint">${minYear}–${maxYear}</span>
+        </div>
+        <div id="clusterPaperList" class="panel-list"></div>
+        <div class="panel-footer">
+            Slide to cap year. Faded nodes in the main graph are either outside this community or published after the cutoff.
+        </div>
+    `;
+    panel.classList.add("open");
+
+    markActiveLegendButton(cluster);
+    updateClusterYearFilter(maxYear);
+}
+
+function closeClusterPanel() {
+    activeClusterFilter = null;
+    document.getElementById("cluster-panel").classList.remove("open");
+    markActiveLegendButton(-1);
+    resetHighlight();
+}
+
+function updateClusterYearFilter(year) {
+    if (!activeClusterFilter) return;
+    year = +year;
+    activeClusterFilter.currentYear = year;
+
+    const labelEl = document.getElementById("clusterYearLabel");
+    if (labelEl) labelEl.textContent = year;
+
+    renderClusterPaperList();
+    applyClusterFilter();
+}
+
+function renderClusterPaperList() {
+    if (!activeClusterFilter) return;
+    const { cluster, currentYear } = activeClusterFilter;
+
+    const papers = fullData.nodes
+        .filter(n => clusterMap[n.id] === cluster && n.year <= currentYear)
+        .sort((a, b) => b.year - a.year || b.citation_count - a.citation_count);
+
+    const list = document.getElementById("clusterPaperList");
+    if (!list) return;
+
+    // Cap rendered rows for performance; very large clusters still show top 500
+    const CAP = 500;
+    const shown = papers.slice(0, CAP);
+    let html = shown.map(p => `
+        <div class="panel-row" onclick="highlightNetwork('${p.id}')" title="Click to highlight in graph">
+            <span class="row-year">${p.year}</span>
+            <span class="row-title">${escapeHtml(p.title || p.id)}</span>
+            <span class="row-cites">${p.citation_count}</span>
+        </div>
+    `).join("");
+    if (papers.length > CAP) {
+        html += `<div style="padding:8px 16px;color:#888;font-size:11px;">
+            …and ${papers.length - CAP} more (showing top ${CAP} by year, then citations).
+        </div>`;
+    }
+    if (papers.length === 0) {
+        html = `<div style="padding:16px;color:#888;font-size:12px;text-align:center;">No papers ≤ ${activeClusterFilter.currentYear} in this cluster.</div>`;
+    }
+    list.innerHTML = html;
+}
+
+// Dim everything outside the selected cluster / past the year cutoff.
+// Runs on top of applyNodeColors (which has set the base fill).
+function applyClusterFilter() {
+    if (!nodeSelection || !linkSelection || !activeClusterFilter) return;
+    const { cluster, currentYear } = activeClusterFilter;
+
+    const inCluster = d => clusterMap[d.id] === cluster && d.year <= currentYear;
+
+    nodeSelection
+        .style("fill-opacity", d => inCluster(d) ? 1 : 0.08)
+        .style("stroke", d => inCluster(d) ? "#2c3e50" : "#fff")
+        .style("stroke-width", d => inCluster(d) ? 1.5 : 0.5);
+
+    linkSelection
+        .style("stroke-opacity", d => {
+            const s = d.source, t = d.target;
+            return (s && t && inCluster(s) && inCluster(t)) ? 0.7 : 0.04;
+        });
+
+    if (labelSelection) {
+        labelSelection.style("opacity", d => inCluster(d) ? 1 : 0.1);
+    }
+}
+
+function escapeHtml(s) {
+    return String(s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 /**
@@ -739,6 +946,39 @@ function resetHighlight() {
     applyNodeColors();
 }
 
+function renderPaperInfo(node, clusterId) {
+    const internal = citationMap[node.id] || 0;
+
+    let clusterBadge = `<span style="color:#999;">— (run Louvain to assign)</span>`;
+    if (clusterId != null) {
+        const isOther = clusterId === clusterOtherIdx;
+        const color = isOther ? OTHER_COLOR : CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length];
+        const label = isOther ? "Other" : `C${clusterId + 1}`;
+        clusterBadge = `
+            <span style="display:inline-flex;align-items:center;gap:5px;">
+                <span style="width:11px;height:11px;border-radius:50%;display:inline-block;
+                             background:${color};border:1px solid rgba(0,0,0,0.15);"></span>
+                <span>${label}</span>
+            </span>`;
+    }
+
+    const openAlexUrl = `https://openalex.org/${encodeURIComponent(node.id)}`;
+
+    const html = `
+        <div style="font-weight:600;color:#2c3e50;margin-bottom:6px;line-height:1.35;">
+            ${escapeHtml(node.title || "(untitled)")}
+        </div>
+        <div style="display:grid;grid-template-columns:auto 1fr;column-gap:10px;row-gap:3px;font-size:12px;">
+            <span style="color:#888;">Year</span>        <span>${node.year ?? "—"}</span>
+            <span style="color:#888;">Citations</span>   <span>${(node.citation_count ?? 0).toLocaleString()} <span style="color:#aaa;">(global)</span></span>
+            <span style="color:#888;">In-dataset</span>  <span>${internal} <span style="color:#aaa;">(refs from other papers here)</span></span>
+            <span style="color:#888;">Cluster</span>     <span>${clusterBadge}</span>
+            <span style="color:#888;">ID</span>          <span><a href="${openAlexUrl}" target="_blank" rel="noopener" style="color:#3498db;text-decoration:none;">${escapeHtml(node.id)} ↗</a></span>
+        </div>
+    `;
+    document.getElementById("paperInfo").innerHTML = html;
+}
+
 function updateSidePanel(node) {
 
     const nodeId = node.id;
@@ -752,6 +992,8 @@ function updateSidePanel(node) {
         d3.select("#clusterLabel")
         .text("(No cluster)");
     }
+
+    renderPaperInfo(node, clusterId);
 
     const yearStats = {};
 
