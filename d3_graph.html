@@ -6,13 +6,13 @@
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f9fbfd; color: #333;}
-        
+
         .header-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px;}
         h2 { margin: 0; color: #2c3e50; }
 
         .controls {
             background: white; padding: 15px 20px; border-radius: 8px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.05); display: flex; align-items: center; gap: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05); display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
         }
 
         .slider-container label { font-weight: bold; margin-right: 10px; color: #555; font-size: 14px;}
@@ -22,6 +22,25 @@
             border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.3s;
         }
         button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+        button.btn-secondary { background-color: #95a5a6; }
+        button.btn-secondary:hover { background-color: #7f8c8d; }
+
+        .cluster-controls {
+            display: flex; align-items: center; gap: 8px;
+            border-left: 2px solid #ecf0f1; padding-left: 20px;
+        }
+        .cluster-controls label { font-weight: bold; color: #555; font-size: 14px; }
+        #cluster-status { font-size: 12px; color: #888; }
+
+        #cluster-legend {
+            background: white; padding: 10px 16px; border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05); margin-top: 8px;
+            display: none;
+        }
+        #cluster-legend strong { font-size: 13px; color: #555; margin-right: 12px; }
+        .legend-item { display: inline-flex; align-items: center; margin-right: 14px; font-size: 12px; }
+        .legend-swatch { width: 12px; height: 12px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; border: 1px solid rgba(0,0,0,0.15); }
 
         #tooltip {
             position: absolute; display: none; min-width: 200px; background: rgba(255, 255, 255, 0.95);
@@ -56,8 +75,26 @@
         <select id="startYear"></select> <span> to </span> <select id="endYear"></select>
     </div>
     <button onclick="updateGraph()">Apply Filter</button>
+
+    <div class="cluster-controls">
+        <label>Clusters:</label>
+        <select id="numClusters">
+            <option value="3">k = 3</option>
+            <option value="4">k = 4</option>
+            <option value="5">k = 5</option>
+            <option value="6" selected>k = 6</option>
+            <option value="7">k = 7</option>
+            <option value="8">k = 8</option>
+        </select>
+        <button id="clusterBtn" onclick="runClustering()">Run Spectral Clustering</button>
+        <button id="resetClusterBtn" class="btn-secondary" onclick="resetClustering()" style="display:none;">Reset Colors</button>
+        <span id="cluster-status"></span>
+    </div>
+
     <span style="font-size: 12px; color: #888; margin-left: auto;">(Click a node to highlight its local network. Click background to reset.)</span>
 </div>
+
+<div id="cluster-legend"></div>
 
 <div id="tooltip">
     <div class="tooltip-title"></div>
@@ -85,7 +122,16 @@ const g = svg.append("g");
 
 let fullData;
 let currentZoom = 1;
-let linkedByIndex = {}; 
+let linkedByIndex = {};
+
+// Hoisted so applyNodeColors() can reference them
+let colorScale;
+let sizeScale;
+
+// Cluster state
+let clusterMode = false;
+let clusterMap = {};  // nodeId -> cluster index
+const CLUSTER_COLORS = d3.schemeTableau10;
 
 const zoom = d3.zoom()
     .scaleExtent([0.3, 5])
@@ -108,7 +154,7 @@ d3.json("graph_with_algorithms.json").then(data => {
         startSelect.append("option").text(y).attr("value", y);
         endSelect.append("option").text(y).attr("value", y);
     });
-    
+
     startSelect.property("value", years[0]);
     endSelect.property("value", years[years.length - 1]);
 
@@ -117,7 +163,9 @@ d3.json("graph_with_algorithms.json").then(data => {
     alert("Error loading JSON. Please make sure Python script generated graph_with_algorithms.json correctly.");
 });
 
+// Called by "Apply Filter" button — resets cluster state on explicit filter change
 function updateGraph() {
+    clearClusterState();
     updateGraphWithZoom(currentZoom);
 }
 
@@ -128,7 +176,7 @@ let labelSelection;
 
 function updateGraphWithZoom(k) {
     currentZoom = k;
-    resetHighlight(); 
+    resetHighlight();
 
     const start = +document.getElementById("startYear").value;
     const end = +document.getElementById("endYear").value;
@@ -148,7 +196,7 @@ function updateGraphWithZoom(k) {
     const nodeSet = new Set(nodes.map(d => d.id));
 
     const links = fullData.links.filter(d =>
-        d.type !== "predicted" && 
+        d.type !== "predicted" &&
         nodeSet.has(d.source.id || d.source) &&
         nodeSet.has(d.target.id || d.target)
     );
@@ -161,8 +209,8 @@ function updateGraphWithZoom(k) {
     });
 
     const maxCitation = d3.max(nodes, d => d.citation_count) || 1;
-    const sizeScale = d3.scaleSqrt().domain([0, maxCitation]).range([4, 18]);
-    const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxCitation]);
+    sizeScale = d3.scaleSqrt().domain([0, maxCitation]).range([4, 18]);
+    colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxCitation]);
 
     linkSelection = g.selectAll("line.link")
         .data(links, d => (d.source.id || d.source) + "-" + (d.target.id || d.target));
@@ -170,17 +218,11 @@ function updateGraphWithZoom(k) {
     linkSelection.exit().remove();
     const linkEnter = linkSelection.enter().append("line").attr("class", "link");
 
-    // linkSelection = linkEnter.merge(linkSelection)
-    //     .attr("stroke", "#bdc3c7") 
-    //     .attr("stroke-width", 1)
-    //     .attr("stroke-opacity", 0.6);
     linkSelection = linkEnter.merge(linkSelection)
-    .attr("stroke", d => d.type === "predicted" ? "#ff7f0e" : "#aaa") 
-    // 💡 改进：让连线粗细受时间影响力权重影响
-    .attr("stroke-width", d => d.type === "predicted" ? 2 : (d.weight * 2)) 
-    .attr("stroke-dasharray", d => d.type === "predicted" ? "5,5" : "none")
-    // 💡 改进：权重越低（年代越久），连线越透明
-    .attr("stroke-opacity", d => d.type === "predicted" ? 0.8 : (d.weight * 0.7));
+        .attr("stroke", d => d.type === "predicted" ? "#ff7f0e" : "#aaa")
+        .attr("stroke-width", d => d.type === "predicted" ? 2 : (d.weight * 2))
+        .attr("stroke-dasharray", d => d.type === "predicted" ? "5,5" : "none")
+        .attr("stroke-opacity", d => d.type === "predicted" ? 0.8 : (d.weight * 0.7));
 
     nodeSelection = g.selectAll("circle.node")
         .data(nodes, d => d.id);
@@ -190,13 +232,14 @@ function updateGraphWithZoom(k) {
 
     nodeSelection = nodeEnter.merge(nodeSelection)
         .attr("r", d => sizeScale(d.citation_count))
-        .attr("fill", d => colorScale(d.citation_count))
         .attr("stroke", "#fff")
         .attr("stroke-width", 1)
         .on("mouseover", function(event, d) {
             tooltip.style("display", "block");
             tooltipTitle.text(d.title || `Paper ID: ${d.id}`);
-            tooltipInfo.html(`Year: ${d.year}<br>Citations: ${d.citation_count}`);
+            const clusterLabel = clusterMode && clusterMap[d.id] != null
+                ? `<br>Cluster: ${clusterMap[d.id] + 1}` : "";
+            tooltipInfo.html(`Year: ${d.year}<br>Citations: ${d.citation_count}${clusterLabel}`);
         })
         .on("mousemove", function(event) {
             tooltip.style("top", (event.pageY + 15) + "px").style("left", (event.pageX + 15) + "px");
@@ -205,7 +248,7 @@ function updateGraphWithZoom(k) {
             tooltip.style("display", "none");
         })
         .on("click", function(event, d) {
-            event.stopPropagation(); 
+            event.stopPropagation();
             highlightNetwork(d.id);
         })
         .call(d3.drag()
@@ -213,6 +256,8 @@ function updateGraphWithZoom(k) {
             .on("drag", dragged)
             .on("end", dragended)
         );
+
+    applyNodeColors();
 
     const top5Nodes = [...nodes].sort((a, b) => b.citation_count - a.citation_count).slice(0, 5);
 
@@ -248,11 +293,11 @@ function updateGraphWithZoom(k) {
             .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
         nodeSelection
             .attr("cx", d => d.x).attr("cy", d => d.y);
-        
-        if(labelSelection) {
+
+        if (labelSelection) {
             labelSelection
                 .attr("x", d => d.x)
-                .attr("y", d => d.y - sizeScale(d.citation_count) - 2); 
+                .attr("y", d => d.y - sizeScale(d.citation_count) - 2);
         }
     }
 
@@ -267,33 +312,257 @@ function updateGraphWithZoom(k) {
     }
 }
 
+// Apply either cluster colors or citation-count colors to all nodes
+function applyNodeColors() {
+    if (!nodeSelection) return;
+    if (clusterMode) {
+        nodeSelection.attr("fill", d => {
+            const c = clusterMap[d.id];
+            return c != null ? CLUSTER_COLORS[c % CLUSTER_COLORS.length] : "#ccc";
+        });
+    } else {
+        nodeSelection.attr("fill", d => colorScale(d.citation_count));
+    }
+}
+
+// ─── Spectral Clustering ────────────────────────────────────────────────────
+
+function runClustering() {
+    if (!nodeSelection || !linkSelection) return;
+
+    const k = +document.getElementById("numClusters").value;
+    const statusEl = document.getElementById("cluster-status");
+    const btn = document.getElementById("clusterBtn");
+
+    statusEl.textContent = "Computing…";
+    btn.disabled = true;
+
+    // Yield to browser to render "Computing…" before blocking
+    setTimeout(() => {
+        try {
+            const visNodes = nodeSelection.data();
+            const visLinks = linkSelection.data();
+            const assignments = computeSpectralClusters(visNodes, visLinks, k);
+
+            clusterMap = {};
+            visNodes.forEach((node, i) => { clusterMap[node.id] = assignments[i]; });
+            clusterMode = true;
+
+            applyNodeColors();
+            renderClusterLegend(k);
+
+            statusEl.textContent = `(${k} clusters, ${visNodes.length} nodes)`;
+            document.getElementById("resetClusterBtn").style.display = "";
+        } catch (e) {
+            statusEl.textContent = "Error — see console";
+            console.error("Spectral clustering failed:", e);
+        }
+        btn.disabled = false;
+    }, 10);
+}
+
+function resetClustering() {
+    clearClusterState();
+    applyNodeColors();
+}
+
+function clearClusterState() {
+    clusterMode = false;
+    clusterMap = {};
+    document.getElementById("cluster-status").textContent = "";
+    document.getElementById("resetClusterBtn").style.display = "none";
+    document.getElementById("cluster-legend").style.display = "none";
+}
+
+function renderClusterLegend(k) {
+    const legend = document.getElementById("cluster-legend");
+    let html = "<strong>Spectral Clusters:</strong>";
+    for (let c = 0; c < k; c++) {
+        html += `<span class="legend-item">
+            <span class="legend-swatch" style="background:${CLUSTER_COLORS[c]}"></span>
+            Cluster ${c + 1}
+        </span>`;
+    }
+    legend.innerHTML = html;
+    legend.style.display = "block";
+}
+
+/**
+ * Spectral clustering via subspace power iteration on the symmetric
+ * normalized adjacency matrix, followed by k-means++ on the eigenvectors.
+ *
+ * Finds top-(k+1) eigenvectors of D^{-1/2} A D^{-1/2}, drops the trivial
+ * first one (λ≈1), and clusters on the remaining k.
+ */
+function computeSpectralClusters(nodes, links, k) {
+    const n = nodes.length;
+    if (n <= k) return nodes.map((_, i) => i);
+
+    // Build index map
+    const idx = {};
+    nodes.forEach((node, i) => { idx[node.id] = i; });
+
+    // Build symmetric, deduplicated adjacency list
+    const adjMap = new Map();  // "min,max" -> weight
+    links.forEach(link => {
+        const s = idx[typeof link.source === 'object' ? link.source.id : link.source];
+        const t = idx[typeof link.target === 'object' ? link.target.id : link.target];
+        if (s == null || t == null || s === t) return;
+        const key = s < t ? `${s},${t}` : `${t},${s}`;
+        adjMap.set(key, (adjMap.get(key) || 0) + (link.weight || 1));
+    });
+
+    const adjList = Array.from({length: n}, () => []);
+    const deg = new Float64Array(n);
+    adjMap.forEach((w, key) => {
+        const [a, b] = key.split(',').map(Number);
+        adjList[a].push({j: b, w});
+        adjList[b].push({j: a, w});
+        deg[a] += w;
+        deg[b] += w;
+    });
+
+    // Symmetric normalized adjacency matrix-vector product
+    // out[i] = Σ_j  w_{ij} / sqrt(d_i * d_j)  * v[j]
+    function matvec(v) {
+        const out = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            const di = deg[i] > 0 ? Math.sqrt(deg[i]) : 1;
+            for (const {j, w} of adjList[i]) {
+                const dj = deg[j] > 0 ? Math.sqrt(deg[j]) : 1;
+                out[i] += (w / (di * dj)) * v[j];
+            }
+        }
+        return out;
+    }
+
+    // Gram-Schmidt orthonormalization (in place)
+    function gramSchmidt(V) {
+        for (let i = 0; i < V.length; i++) {
+            for (let j = 0; j < i; j++) {
+                let dot = 0;
+                for (let l = 0; l < n; l++) dot += V[i][l] * V[j][l];
+                for (let l = 0; l < n; l++) V[i][l] -= dot * V[j][l];
+            }
+            let norm = 0;
+            for (let l = 0; l < n; l++) norm += V[i][l] * V[i][l];
+            norm = Math.sqrt(norm) || 1;
+            for (let l = 0; l < n; l++) V[i][l] /= norm;
+        }
+    }
+
+    // Subspace iteration: find top-(k+1) eigenvectors
+    const m = k + 1;
+    let V = Array.from({length: m}, () => {
+        const v = new Float64Array(n);
+        for (let i = 0; i < n; i++) v[i] = Math.random() - 0.5;
+        return v;
+    });
+
+    for (let iter = 0; iter < 50; iter++) {
+        V = V.map(matvec);
+        gramSchmidt(V);
+    }
+
+    // Drop V[0] (trivial λ≈1), use V[1..k] as per-node features
+    const features = Array.from({length: n}, (_, i) =>
+        Array.from({length: k}, (_, c) => V[c + 1][i])
+    );
+
+    return kMeanspp(features, k);
+}
+
+/** k-means++ with up to maxIter Lloyd iterations */
+function kMeanspp(points, k, maxIter = 60) {
+    const n = points.length;
+    const dim = points[0].length;
+
+    // k-means++ seeding
+    const ctrs = [points[Math.floor(Math.random() * n)].slice()];
+    for (let c = 1; c < k; c++) {
+        const dists = points.map(p => {
+            let minD = Infinity;
+            for (const ctr of ctrs) {
+                let d = 0;
+                for (let i = 0; i < dim; i++) d += (p[i] - ctr[i]) ** 2;
+                if (d < minD) minD = d;
+            }
+            return minD;
+        });
+        const total = dists.reduce((a, b) => a + b, 0);
+        let r = Math.random() * total;
+        let pick = 0;
+        for (; pick < n - 1 && r > 0; pick++) r -= dists[pick];
+        ctrs.push(points[pick].slice());
+    }
+
+    let labels = new Array(n).fill(0);
+
+    for (let iter = 0; iter < maxIter; iter++) {
+        let changed = false;
+
+        // Assign each point to nearest centroid
+        for (let i = 0; i < n; i++) {
+            let best = 0, bestD = Infinity;
+            for (let c = 0; c < k; c++) {
+                let d = 0;
+                for (let j = 0; j < dim; j++) d += (points[i][j] - ctrs[c][j]) ** 2;
+                if (d < bestD) { bestD = d; best = c; }
+            }
+            if (labels[i] !== best) { labels[i] = best; changed = true; }
+        }
+
+        if (!changed) break;
+
+        // Update centroids
+        const sums = Array.from({length: k}, () => new Array(dim).fill(0));
+        const cnts = new Array(k).fill(0);
+        for (let i = 0; i < n; i++) {
+            const c = labels[i];
+            for (let j = 0; j < dim; j++) sums[c][j] += points[i][j];
+            cnts[c]++;
+        }
+        for (let c = 0; c < k; c++) {
+            if (cnts[c] > 0)
+                for (let j = 0; j < dim; j++) ctrs[c][j] = sums[c][j] / cnts[c];
+        }
+    }
+
+    return labels;
+}
+
+// ─── Highlight / Reset ──────────────────────────────────────────────────────
+
 function isConnected(a, b) {
     return linkedByIndex[`${a},${b}`] || linkedByIndex[`${b},${a}`] || a === b;
 }
 
 function highlightNetwork(nodeId) {
     nodeSelection.style("fill-opacity", d => isConnected(d.id, nodeId) ? 1 : 0.1)
-                 .style("stroke", d => d.id === nodeId ? "#e74c3c" : "#fff") 
+                 .style("stroke", d => d.id === nodeId ? "#e74c3c" : "#fff")
                  .style("stroke-width", d => d.id === nodeId ? 3 : 1);
 
     linkSelection.style("stroke-opacity", d => (d.source.id === nodeId || d.target.id === nodeId) ? 0.9 : 0.05)
                  .style("stroke-width", d => (d.source.id === nodeId || d.target.id === nodeId) ? 2 : 1)
                  .style("stroke", d => (d.source.id === nodeId || d.target.id === nodeId) ? "#2980b9" : "#bdc3c7");
 
-    if(labelSelection) {
+    if (labelSelection) {
         labelSelection.style("opacity", d => isConnected(d.id, nodeId) ? 1 : 0.1);
     }
 }
 
 function resetHighlight() {
-    // 🔥 加上这行保命代码：如果节点还没画出来，就直接跳过，不要报错！
-    if (!nodeSelection || !linkSelection) return; 
-    
-    nodeSelection.style("fill-opacity", 1).style("stroke", "#fff").style("stroke-width", 1);
-    linkSelection.style("stroke-opacity", 0.6).style("stroke-width", 1).style("stroke", "#bdc3c7");
-    if(labelSelection) labelSelection.style("opacity", 1);
-}
+    if (!nodeSelection || !linkSelection) return;
 
+    nodeSelection.style("fill-opacity", 1).style("stroke", "#fff").style("stroke-width", 1);
+    linkSelection
+        .style("stroke-opacity", d => d.type === "predicted" ? 0.8 : (d.weight * 0.7))
+        .style("stroke-width", d => d.type === "predicted" ? 2 : (d.weight * 2))
+        .style("stroke", d => d.type === "predicted" ? "#ff7f0e" : "#aaa");
+    if (labelSelection) labelSelection.style("opacity", 1);
+
+    applyNodeColors();
+}
 </script>
 </body>
 </html>
