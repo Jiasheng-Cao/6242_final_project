@@ -2,41 +2,93 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Paper Citation Graph</title>
+    <title>Dynamic Citation Network</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f9fbfd; color: #333;}
+        
+        .header-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px;}
+        h2 { margin: 0; color: #2c3e50; }
+
+        .controls {
+            background: white; padding: 15px 20px; border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05); display: flex; align-items: center; gap: 20px;
+        }
+
+        .slider-container label { font-weight: bold; margin-right: 10px; color: #555; font-size: 14px;}
+        select { padding: 5px; border-radius: 4px; border: 1px solid #ccc; font-size: 14px;}
+        button {
+            padding: 8px 16px; background-color: #3498db; color: white; border: none;
+            border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.3s;
+        }
+        button:hover { background-color: #2980b9; }
+
+        #tooltip {
+            position: absolute; display: none; min-width: 200px; background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #e0e0e0; padding: 12px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            pointer-events: none; font-size: 13px; line-height: 1.5; z-index: 10;
+        }
+        #tooltip .tooltip-title { font-weight: bold; margin-bottom: 8px; color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 4px; font-size: 14px;}
+        #tooltip .tooltip-info { color: #666; }
+
+        svg { background-color: white; border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);}
+
+        .static-label {
+            font-size: 11px; font-weight: 600; fill: #2c3e50;
+            text-shadow: 2px 2px 2px rgba(255,255,255,0.95), -2px -2px 2px rgba(255,255,255,0.95), 2px -2px 2px rgba(255,255,255,0.95), -2px 2px 2px rgba(255,255,255,0.95);
+            pointer-events: none;
+        }
+
+        circle { transition: fill-opacity 0.3s, stroke-opacity 0.3s; cursor: pointer;}
+        line { transition: stroke-opacity 0.3s; }
+    </style>
 </head>
 
 <body>
 
-<h2>Paper Citation Visualization</h2>
+<div class="header-container">
+    <h2>Dynamic Citation Network</h2>
+</div>
 
-Start Year:
-<select id="startYear"></select>
+<div class="controls">
+    <div class="slider-container">
+        <label>Time Window:</label>
+        <select id="startYear"></select> <span> to </span> <select id="endYear"></select>
+    </div>
+    <button onclick="updateGraph()">Apply Filter</button>
+    <span style="font-size: 12px; color: #888; margin-left: auto;">(Click a node to highlight its local network. Click background to reset.)</span>
+</div>
 
-End Year:
-<select id="endYear"></select>
+<div id="tooltip">
+    <div class="tooltip-title"></div>
+    <div class="tooltip-info"></div>
+</div>
 
-<button onclick="updateGraph()">Update</button>
-
-<svg width="1000" height="700"></svg>
+<svg width="1000" height="750" style="margin-top: 15px;"></svg>
 
 <script>
-
 const svg = d3.select("svg");
 const width = +svg.attr("width");
 const height = +svg.attr("height");
 
-// 🔥 所有图放这里（支持zoom）
+const tooltip = d3.select("#tooltip");
+const tooltipTitle = tooltip.select(".tooltip-title");
+const tooltipInfo = tooltip.select(".tooltip-info");
+
+const background = svg.append("rect")
+    .attr("width", width)
+    .attr("height", height)
+    .attr("fill", "transparent")
+    .on("click", resetHighlight);
+
 const g = svg.append("g");
 
 let fullData;
 let currentZoom = 1;
+let linkedByIndex = {}; 
 
-// ===============================
-// zoom（核心🔥）
-// ===============================
 const zoom = d3.zoom()
-    .scaleExtent([0.5, 5])
+    .scaleExtent([0.3, 5])
     .on("zoom", (event) => {
         g.attr("transform", event.transform);
         updateGraphWithZoom(event.transform.k);
@@ -44,10 +96,7 @@ const zoom = d3.zoom()
 
 svg.call(zoom);
 
-// ===============================
-// 加载数据
-// ===============================
-d3.json("graph.json").then(data => {
+d3.json("graph_with_algorithms.json").then(data => {
     fullData = data;
 
     const years = [...new Set(data.nodes.map(d => d.year))].sort();
@@ -59,35 +108,34 @@ d3.json("graph.json").then(data => {
         startSelect.append("option").text(y).attr("value", y);
         endSelect.append("option").text(y).attr("value", y);
     });
+    
+    startSelect.property("value", years[0]);
+    endSelect.property("value", years[years.length - 1]);
 
     updateGraph();
+}).catch(err => {
+    alert("Error loading JSON. Please make sure Python script generated graph_with_algorithms.json correctly.");
 });
 
-// ===============================
 function updateGraph() {
     updateGraphWithZoom(currentZoom);
 }
 
-// ===============================
-// 🔥 核心：根据zoom动态更新
-// ===============================
 let simulation;
 let nodeSelection;
 let linkSelection;
-function updateGraphWithZoom(k) {
+let labelSelection;
 
+function updateGraphWithZoom(k) {
     currentZoom = k;
+    resetHighlight(); 
 
     const start = +document.getElementById("startYear").value;
     const end = +document.getElementById("endYear").value;
 
     let nodes = fullData.nodes.filter(d => d.year >= start && d.year <= end);
 
-    // ===============================
-    // 节点数量控制（保持你原逻辑）
-    // ===============================
     let maxNodes;
-
     if (k < 1) maxNodes = 100;
     else if (k < 2) maxNodes = 300;
     else if (k < 3) maxNodes = 700;
@@ -100,112 +148,152 @@ function updateGraphWithZoom(k) {
     const nodeSet = new Set(nodes.map(d => d.id));
 
     const links = fullData.links.filter(d =>
+        d.type !== "predicted" && 
         nodeSet.has(d.source.id || d.source) &&
         nodeSet.has(d.target.id || d.target)
     );
 
-    // ===============================
-    // scale（不变）
-    // ===============================
+    linkedByIndex = {};
+    links.forEach(d => {
+        const sourceId = typeof d.source === "object" ? d.source.id : d.source;
+        const targetId = typeof d.target === "object" ? d.target.id : d.target;
+        linkedByIndex[`${sourceId},${targetId}`] = 1;
+    });
+
     const maxCitation = d3.max(nodes, d => d.citation_count) || 1;
+    const sizeScale = d3.scaleSqrt().domain([0, maxCitation]).range([4, 18]);
+    const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxCitation]);
 
-    const sizeScale = d3.scaleSqrt()
-        .domain([0, maxCitation])
-        .range([3, 15]);
-
-    const colorScale = d3.scaleSequential(d3.interpolateBlues)
-        .domain([0, maxCitation]);
-
-    // ===============================
-    // 🔥 DOM JOIN（核心优化，不再 remove）
-    // ===============================
-    linkSelection = g.selectAll("line")
-        .data(links, d => d.source + "-" + d.target);
+    linkSelection = g.selectAll("line.link")
+        .data(links, d => (d.source.id || d.source) + "-" + (d.target.id || d.target));
 
     linkSelection.exit().remove();
+    const linkEnter = linkSelection.enter().append("line").attr("class", "link");
 
-    const linkEnter = linkSelection.enter()
-        .append("line")
-        .attr("stroke", "#aaa")
-        .attr("stroke-width", 1);
+    // linkSelection = linkEnter.merge(linkSelection)
+    //     .attr("stroke", "#bdc3c7") 
+    //     .attr("stroke-width", 1)
+    //     .attr("stroke-opacity", 0.6);
+    linkSelection = linkEnter.merge(linkSelection)
+    .attr("stroke", d => d.type === "predicted" ? "#ff7f0e" : "#aaa") 
+    // 💡 改进：让连线粗细受时间影响力权重影响
+    .attr("stroke-width", d => d.type === "predicted" ? 2 : (d.weight * 2)) 
+    .attr("stroke-dasharray", d => d.type === "predicted" ? "5,5" : "none")
+    // 💡 改进：权重越低（年代越久），连线越透明
+    .attr("stroke-opacity", d => d.type === "predicted" ? 0.8 : (d.weight * 0.7));
 
-    linkSelection = linkEnter.merge(linkSelection);
-
-    // ------------------------------
-
-    nodeSelection = g.selectAll("circle")
+    nodeSelection = g.selectAll("circle.node")
         .data(nodes, d => d.id);
 
     nodeSelection.exit().remove();
+    const nodeEnter = nodeSelection.enter().append("circle").attr("class", "node");
 
-    const nodeEnter = nodeSelection.enter()
-        .append("circle")
+    nodeSelection = nodeEnter.merge(nodeSelection)
         .attr("r", d => sizeScale(d.citation_count))
         .attr("fill", d => colorScale(d.citation_count))
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 1)
+        .on("mouseover", function(event, d) {
+            tooltip.style("display", "block");
+            tooltipTitle.text(d.title || `Paper ID: ${d.id}`);
+            tooltipInfo.html(`Year: ${d.year}<br>Citations: ${d.citation_count}`);
+        })
+        .on("mousemove", function(event) {
+            tooltip.style("top", (event.pageY + 15) + "px").style("left", (event.pageX + 15) + "px");
+        })
+        .on("mouseout", function() {
+            tooltip.style("display", "none");
+        })
+        .on("click", function(event, d) {
+            event.stopPropagation(); 
+            highlightNetwork(d.id);
+        })
         .call(d3.drag()
             .on("start", dragstarted)
             .on("drag", dragged)
             .on("end", dragended)
         );
 
-    nodeEnter.append("title")
-        .text(d => `${d.title || d.id}\nYear: ${d.year}\nCitations: ${d.citation_count}`);
+    const top5Nodes = [...nodes].sort((a, b) => b.citation_count - a.citation_count).slice(0, 5);
 
-    nodeSelection = nodeEnter.merge(nodeSelection);
+    labelSelection = g.selectAll("text.static-label")
+        .data(top5Nodes, d => d.id);
 
-    // ===============================
-    // 🔥 simulation复用（关键）
-    // ===============================
+    labelSelection.exit().remove();
+    const labelEnter = labelSelection.enter().append("text").attr("class", "static-label").attr("text-anchor", "middle");
+
+    labelSelection = labelEnter.merge(labelSelection)
+        .text(d => {
+            let label = d.title || d.id;
+            return label.length > 20 ? label.substring(0, 20) + "..." : label;
+        });
+
     if (!simulation) {
         simulation = d3.forceSimulation(nodes)
             .force("link", d3.forceLink(links).id(d => d.id).distance(60))
-            .force("charge", d3.forceManyBody().strength(-50))
+            .force("charge", d3.forceManyBody().strength(-10))
             .force("center", d3.forceCenter(width / 2, height / 2))
-            .force("x", d3.forceX(width / 2).strength(0.05))
-            .force("y", d3.forceY(height / 2).strength(0.05))
-            .force("collision", d3.forceCollide().radius(d => sizeScale(d.citation_count) + 2))
-            .alphaDecay(0.06)   // 🔥更快收敛（不影响视觉）
-            .velocityDecay(0.4);
-
+            .force("collision", d3.forceCollide().radius(d => sizeScale(d.citation_count) + 8))
+            .alphaDecay(0.05).velocityDecay(0.4);
         simulation.on("tick", ticked);
     } else {
-        // 🔥 不重建，只更新数据
         simulation.nodes(nodes);
         simulation.force("link").links(links);
-        simulation.alpha(0.5).restart();
+        simulation.alpha(0.15).restart();
     }
 
     function ticked() {
         linkSelection
-            .attr("x1", d => d.source.x)
-            .attr("y1", d => d.source.y)
-            .attr("x2", d => d.target.x)
-            .attr("y2", d => d.target.y);
-
+            .attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
         nodeSelection
-            .attr("cx", d => d.x)
-            .attr("cy", d => d.y);
+            .attr("cx", d => d.x).attr("cy", d => d.y);
+        
+        if(labelSelection) {
+            labelSelection
+                .attr("x", d => d.x)
+                .attr("y", d => d.y - sizeScale(d.citation_count) - 2); 
+        }
     }
 
     function dragstarted(event, d) {
-        if (!event.active) simulation.alphaTarget(0.3).restart();
-        d.fx = d.x;
-        d.fy = d.y;
+        if (!event.active) simulation.alphaTarget(0.02).restart();
+        d.fx = d.x; d.fy = d.y;
     }
-
-    function dragged(event, d) {
-        d.fx = event.x;
-        d.fy = event.y;
-    }
-
+    function dragged(event, d) { d.fx = event.x; d.fy = event.y; }
     function dragended(event, d) {
         if (!event.active) simulation.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
+        d.fx = null; d.fy = null;
     }
 }
 
-</script>
+function isConnected(a, b) {
+    return linkedByIndex[`${a},${b}`] || linkedByIndex[`${b},${a}`] || a === b;
+}
 
+function highlightNetwork(nodeId) {
+    nodeSelection.style("fill-opacity", d => isConnected(d.id, nodeId) ? 1 : 0.1)
+                 .style("stroke", d => d.id === nodeId ? "#e74c3c" : "#fff") 
+                 .style("stroke-width", d => d.id === nodeId ? 3 : 1);
+
+    linkSelection.style("stroke-opacity", d => (d.source.id === nodeId || d.target.id === nodeId) ? 0.9 : 0.05)
+                 .style("stroke-width", d => (d.source.id === nodeId || d.target.id === nodeId) ? 2 : 1)
+                 .style("stroke", d => (d.source.id === nodeId || d.target.id === nodeId) ? "#2980b9" : "#bdc3c7");
+
+    if(labelSelection) {
+        labelSelection.style("opacity", d => isConnected(d.id, nodeId) ? 1 : 0.1);
+    }
+}
+
+function resetHighlight() {
+    // 🔥 加上这行保命代码：如果节点还没画出来，就直接跳过，不要报错！
+    if (!nodeSelection || !linkSelection) return; 
+    
+    nodeSelection.style("fill-opacity", 1).style("stroke", "#fff").style("stroke-width", 1);
+    linkSelection.style("stroke-opacity", 0.6).style("stroke-width", 1).style("stroke", "#bdc3c7");
+    if(labelSelection) labelSelection.style("opacity", 1);
+}
+
+</script>
 </body>
 </html>
