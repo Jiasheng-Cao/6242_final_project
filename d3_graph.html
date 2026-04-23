@@ -77,16 +77,22 @@
     <button onclick="updateGraph()">Apply Filter</button>
 
     <div class="cluster-controls">
-        <label>Clusters:</label>
-        <select id="numClusters">
-            <option value="3">k = 3</option>
-            <option value="4">k = 4</option>
-            <option value="5">k = 5</option>
-            <option value="6" selected>k = 6</option>
-            <option value="7">k = 7</option>
-            <option value="8">k = 8</option>
-        </select>
-        <button id="clusterBtn" onclick="runClustering()">Run Spectral Clustering</button>
+        <label>Communities:</label>
+        <label title="Resolution γ: lower → fewer, larger communities; higher → more, smaller communities"
+               style="font-weight:normal;font-size:12px;color:#666;">
+            γ=<span id="resolutionValue">1.0</span>
+        </label>
+        <input type="range" id="resolution" min="0.001" max="0.2" step="0.001" value="1.0"
+               oninput="document.getElementById('resolutionValue').textContent = (+this.value).toFixed(3);"
+               style="width:100px;">
+        <label title="Communities smaller than this get merged into a gray 'Other' bucket. Fixes the 'every isolated node is its own community' problem."
+               style="font-weight:normal;font-size:12px;color:#666;">
+            min size=<span id="minSizeValue">3</span>
+        </label>
+        <input type="range" id="minSize" min="1" max="30" step="1" value="3"
+               oninput="document.getElementById('minSizeValue').textContent = this.value;"
+               style="width:80px;">
+        <button id="clusterBtn" onclick="runClustering()">Detect Communities (Louvain)</button>
         <button id="resetClusterBtn" class="btn-secondary" onclick="resetClustering()" style="display:none;">Reset Colors</button>
         <span id="cluster-status"></span>
     </div>
@@ -130,8 +136,11 @@ let sizeScale;
 
 // Cluster state
 let clusterMode = false;
-let clusterMap = {};  // nodeId -> cluster index
-const CLUSTER_COLORS = d3.schemeTableau10;
+let clusterMap = {};       // nodeId -> cluster index
+let clusterOtherIdx = -1;  // label reserved for the "Other" (small-community) bucket; -1 if unused
+// Louvain may return any number of communities, so keep a big palette
+const CLUSTER_COLORS = [...d3.schemeTableau10, ...d3.schemeSet3, ...d3.schemePaired];
+const OTHER_COLOR = "#cfd8dc";
 
 const zoom = d3.zoom()
     .scaleExtent([0.3, 5])
@@ -163,9 +172,10 @@ d3.json("graph_with_algorithms.json").then(data => {
     alert("Error loading JSON. Please make sure Python script generated graph_with_algorithms.json correctly.");
 });
 
-// Called by "Apply Filter" button — resets cluster state on explicit filter change
+// Called by "Apply Filter" button. Cluster assignments are global (computed
+// on the full graph), so they survive year-filter and zoom changes — the
+// new visible subset just reads from the cached clusterMap.
 function updateGraph() {
-    clearClusterState();
     updateGraphWithZoom(currentZoom);
 }
 
@@ -318,19 +328,20 @@ function applyNodeColors() {
     if (clusterMode) {
         nodeSelection.attr("fill", d => {
             const c = clusterMap[d.id];
-            return c != null ? CLUSTER_COLORS[c % CLUSTER_COLORS.length] : "#ccc";
+            if (c == null) return "#ccc";
+            if (c === clusterOtherIdx) return OTHER_COLOR;
+            return CLUSTER_COLORS[c % CLUSTER_COLORS.length];
         });
     } else {
         nodeSelection.attr("fill", d => colorScale(d.citation_count));
     }
 }
 
-// ─── Spectral Clustering ────────────────────────────────────────────────────
+// ─── Community Detection (Louvain) ──────────────────────────────────────────
 
 function runClustering() {
     if (!nodeSelection || !linkSelection) return;
 
-    const k = +document.getElementById("numClusters").value;
     const statusEl = document.getElementById("cluster-status");
     const btn = document.getElementById("clusterBtn");
 
@@ -340,25 +351,80 @@ function runClustering() {
     // Yield to browser to render "Computing…" before blocking
     setTimeout(() => {
         try {
-            const visNodes = nodeSelection.data();
-            const visLinks = linkSelection.data();
-            const assignments = computeSpectralClusters(visNodes, visLinks, k);
+            // Cluster on the FULL graph (ignoring year filter and zoom-based
+            // node cap) so cluster colors stay stable as the user pans around.
+            const allNodes = fullData.nodes;
+            const allLinks = fullData.links.filter(d => d.type !== "predicted");
+            const resolution = +document.getElementById("resolution").value;
+            const minSize = +document.getElementById("minSize").value;
+
+            const t0 = performance.now();
+            const { labels: rawLabels, modularity } = louvain(allNodes, allLinks, resolution);
+            const processed = postProcessCommunities(rawLabels, minSize);
+            const labels = processed.labels;
+            const k = processed.numMain;
+            const elapsed = Math.round(performance.now() - t0);
 
             clusterMap = {};
-            visNodes.forEach((node, i) => { clusterMap[node.id] = assignments[i]; });
+            allNodes.forEach((node, i) => { clusterMap[node.id] = labels[i]; });
             clusterMode = true;
+            clusterOtherIdx = processed.otherIdx;
 
             applyNodeColors();
-            renderClusterLegend(k);
+            renderClusterLegend(processed);
 
-            statusEl.textContent = `(${k} clusters, ${visNodes.length} nodes)`;
+            const otherNote = processed.otherNodes > 0
+                ? `, +${processed.otherNodes} in Other (${processed.otherGroups} tiny groups)`
+                : "";
+            statusEl.textContent =
+                `(${k} communities across ${allNodes.length} papers, ` +
+                `γ=${resolution.toFixed(3)}, Q=${modularity.toFixed(3)}${otherNote}, ${elapsed}ms)`;
             document.getElementById("resetClusterBtn").style.display = "";
         } catch (e) {
             statusEl.textContent = "Error — see console";
-            console.error("Spectral clustering failed:", e);
+            console.error("Louvain clustering failed:", e);
         }
         btn.disabled = false;
     }, 10);
+}
+
+/**
+ * Collapse communities smaller than minSize into a single "Other" bucket.
+ * Main communities are relabeled 0..numMain-1 in descending order of size,
+ * so colors are stable-ish across runs (largest group always gets color 0).
+ *
+ * Returns {
+ *   labels:       new label per node (otherIdx for merged-small, else 0..numMain-1)
+ *   numMain:      count of kept communities
+ *   otherIdx:     label index used for the Other bucket, or -1 if none
+ *   otherNodes:   total nodes that fell into Other
+ *   otherGroups:  number of original communities that got merged in
+ *   sizes:        array of main-community sizes [size0, size1, ...]
+ * }
+ */
+function postProcessCommunities(rawLabels, minSize) {
+    const counts = new Map();
+    rawLabels.forEach(l => counts.set(l, (counts.get(l) || 0) + 1));
+
+    const big = [...counts.entries()]
+        .filter(([, n]) => n >= minSize)
+        .sort((a, b) => b[1] - a[1]);
+
+    const remap = new Map();
+    big.forEach(([origLabel,], i) => remap.set(origLabel, i));
+
+    const numMain = big.length;
+    let otherNodes = 0;
+    let otherGroups = 0;
+    counts.forEach((n, l) => {
+        if (!remap.has(l)) { otherNodes += n; otherGroups++; }
+    });
+
+    const otherIdx = otherNodes > 0 ? numMain : -1;
+    const labels = rawLabels.map(l => remap.has(l) ? remap.get(l) : otherIdx);
+    const sizes = big.map(([, n]) => n);
+
+    return { labels, numMain, otherIdx, otherNodes, otherGroups, sizes };
 }
 
 function resetClustering() {
@@ -369,18 +435,25 @@ function resetClustering() {
 function clearClusterState() {
     clusterMode = false;
     clusterMap = {};
+    clusterOtherIdx = -1;
     document.getElementById("cluster-status").textContent = "";
     document.getElementById("resetClusterBtn").style.display = "none";
     document.getElementById("cluster-legend").style.display = "none";
 }
 
-function renderClusterLegend(k) {
+function renderClusterLegend(processed) {
     const legend = document.getElementById("cluster-legend");
-    let html = "<strong>Spectral Clusters:</strong>";
-    for (let c = 0; c < k; c++) {
+    let html = "<strong>Louvain Communities:</strong>";
+    for (let c = 0; c < processed.numMain; c++) {
         html += `<span class="legend-item">
-            <span class="legend-swatch" style="background:${CLUSTER_COLORS[c]}"></span>
-            Cluster ${c + 1}
+            <span class="legend-swatch" style="background:${CLUSTER_COLORS[c % CLUSTER_COLORS.length]}"></span>
+            C${c + 1} <span style="color:#999;margin-left:4px;">(${processed.sizes[c]})</span>
+        </span>`;
+    }
+    if (processed.otherNodes > 0) {
+        html += `<span class="legend-item" title="${processed.otherGroups} tiny communities merged into one gray bucket">
+            <span class="legend-swatch" style="background:${OTHER_COLOR}"></span>
+            Other <span style="color:#999;margin-left:4px;">(${processed.otherNodes} nodes, ${processed.otherGroups} groups)</span>
         </span>`;
     }
     legend.innerHTML = html;
@@ -388,147 +461,194 @@ function renderClusterLegend(k) {
 }
 
 /**
- * Spectral clustering via subspace power iteration on the symmetric
- * normalized adjacency matrix, followed by k-means++ on the eigenvectors.
+ * Louvain community detection (Blondel et al. 2008).
+ * Hierarchical modularity optimization — picks the number of
+ * communities automatically. Returns { labels, modularity } where
+ * labels[i] is the community index of nodes[i] and communities are
+ * relabeled 0..k-1 in order of first appearance.
  *
- * Finds top-(k+1) eigenvectors of D^{-1/2} A D^{-1/2}, drops the trivial
- * first one (λ≈1), and clusters on the remaining k.
+ * Multi-level: local optimization → aggregate into super-graph → repeat
+ * until modularity stops improving.
  */
-function computeSpectralClusters(nodes, links, k) {
+function louvain(nodes, links, resolution = 1.0) {
     const n = nodes.length;
-    if (n <= k) return nodes.map((_, i) => i);
+    if (n === 0) return { labels: [], modularity: 0 };
 
-    // Build index map
+    // Build deduplicated, undirected weighted adjacency for the base graph
     const idx = {};
     nodes.forEach((node, i) => { idx[node.id] = i; });
 
-    // Build symmetric, deduplicated adjacency list
-    const adjMap = new Map();  // "min,max" -> weight
+    const edgeMap = new Map();  // "min,max" -> summed weight
     links.forEach(link => {
         const s = idx[typeof link.source === 'object' ? link.source.id : link.source];
         const t = idx[typeof link.target === 'object' ? link.target.id : link.target];
         if (s == null || t == null || s === t) return;
         const key = s < t ? `${s},${t}` : `${t},${s}`;
-        adjMap.set(key, (adjMap.get(key) || 0) + (link.weight || 1));
+        edgeMap.set(key, (edgeMap.get(key) || 0) + (link.weight || 1));
     });
 
-    const adjList = Array.from({length: n}, () => []);
-    const deg = new Float64Array(n);
-    adjMap.forEach((w, key) => {
+    const baseAdj = Array.from({length: n}, () => new Map());
+    edgeMap.forEach((w, key) => {
         const [a, b] = key.split(',').map(Number);
-        adjList[a].push({j: b, w});
-        adjList[b].push({j: a, w});
-        deg[a] += w;
-        deg[b] += w;
+        baseAdj[a].set(b, w);
+        baseAdj[b].set(a, w);
     });
 
-    // Symmetric normalized adjacency matrix-vector product
-    // out[i] = Σ_j  w_{ij} / sqrt(d_i * d_j)  * v[j]
-    function matvec(v) {
-        const out = new Float64Array(n);
-        for (let i = 0; i < n; i++) {
-            const di = deg[i] > 0 ? Math.sqrt(deg[i]) : 1;
-            for (const {j, w} of adjList[i]) {
-                const dj = deg[j] > 0 ? Math.sqrt(deg[j]) : 1;
-                out[i] += (w / (di * dj)) * v[j];
+    // Isolated nodes (no edges) fall into their own singleton community.
+    // Louvain local optimization handles this automatically.
+
+    // Run hierarchical Louvain
+    let partition = Array.from({length: n}, (_, i) => i);
+    let currentAdj = baseAdj;
+    let currentN = n;
+
+    for (let level = 0; level < 20; level++) {
+        const labels = louvainLocal(currentN, currentAdj, resolution);
+        const numC = labels.length ? Math.max(...labels) + 1 : 0;
+
+        // Propagate level-up labels to original nodes
+        partition = partition.map(p => labels[p]);
+
+        // Stop if no merges happened at this level
+        if (numC === currentN) break;
+
+        // Aggregate: communities become super-nodes
+        const newAdj = Array.from({length: numC}, () => new Map());
+        for (let i = 0; i < currentN; i++) {
+            const ci = labels[i];
+            for (const [j, w] of currentAdj[i]) {
+                const cj = labels[j];
+                newAdj[ci].set(cj, (newAdj[ci].get(cj) || 0) + w);
             }
         }
-        return out;
+
+        currentAdj = newAdj;
+        currentN = numC;
     }
 
-    // Gram-Schmidt orthonormalization (in place)
-    function gramSchmidt(V) {
-        for (let i = 0; i < V.length; i++) {
-            for (let j = 0; j < i; j++) {
-                let dot = 0;
-                for (let l = 0; l < n; l++) dot += V[i][l] * V[j][l];
-                for (let l = 0; l < n; l++) V[i][l] -= dot * V[j][l];
-            }
-            let norm = 0;
-            for (let l = 0; l < n; l++) norm += V[i][l] * V[i][l];
-            norm = Math.sqrt(norm) || 1;
-            for (let l = 0; l < n; l++) V[i][l] /= norm;
-        }
-    }
-
-    // Subspace iteration: find top-(k+1) eigenvectors
-    const m = k + 1;
-    let V = Array.from({length: m}, () => {
-        const v = new Float64Array(n);
-        for (let i = 0; i < n; i++) v[i] = Math.random() - 0.5;
-        return v;
+    // Relabel communities to 0..k-1 in order of first appearance
+    const remap = {};
+    let next = 0;
+    const finalLabels = partition.map(p => {
+        if (remap[p] == null) remap[p] = next++;
+        return remap[p];
     });
 
-    for (let iter = 0; iter < 50; iter++) {
-        V = V.map(matvec);
-        gramSchmidt(V);
-    }
-
-    // Drop V[0] (trivial λ≈1), use V[1..k] as per-node features
-    const features = Array.from({length: n}, (_, i) =>
-        Array.from({length: k}, (_, c) => V[c + 1][i])
-    );
-
-    return kMeanspp(features, k);
+    return { labels: finalLabels, modularity: computeModularity(baseAdj, finalLabels) };
 }
 
-/** k-means++ with up to maxIter Lloyd iterations */
-function kMeanspp(points, k, maxIter = 60) {
-    const n = points.length;
-    const dim = points[0].length;
+/**
+ * One level of Louvain local optimization: greedy modularity maximization
+ * by moving nodes between neighboring communities until no improvement.
+ * Returns labels (0..k-1) for each node in the input graph.
+ */
+function louvainLocal(n, adj, resolution = 1.0) {
+    const community = new Int32Array(n);
+    for (let i = 0; i < n; i++) community[i] = i;
 
-    // k-means++ seeding
-    const ctrs = [points[Math.floor(Math.random() * n)].slice()];
-    for (let c = 1; c < k; c++) {
-        const dists = points.map(p => {
-            let minD = Infinity;
-            for (const ctr of ctrs) {
-                let d = 0;
-                for (let i = 0; i < dim; i++) d += (p[i] - ctr[i]) ** 2;
-                if (d < minD) minD = d;
-            }
-            return minD;
+    // Weighted degree (self-loops, if present, contribute fully)
+    const deg = new Float64Array(n);
+    let sumDeg = 0;
+    for (let i = 0; i < n; i++) {
+        for (const [, w] of adj[i]) deg[i] += w;
+        sumDeg += deg[i];
+    }
+    const m2 = sumDeg;  // = 2m
+    if (m2 === 0) {
+        // Fully disconnected: every node its own community → relabel
+        const remap = {};
+        let next = 0;
+        return Array.from(community, c => {
+            if (remap[c] == null) remap[c] = next++;
+            return remap[c];
         });
-        const total = dists.reduce((a, b) => a + b, 0);
-        let r = Math.random() * total;
-        let pick = 0;
-        for (; pick < n - 1 && r > 0; pick++) r -= dists[pick];
-        ctrs.push(points[pick].slice());
     }
 
-    let labels = new Array(n).fill(0);
+    // sigmaTot[C] = sum of weighted degrees of nodes currently in C
+    const sigmaTot = new Float64Array(n);
+    for (let i = 0; i < n; i++) sigmaTot[i] = deg[i];
 
-    for (let iter = 0; iter < maxIter; iter++) {
-        let changed = false;
+    let improved = true;
+    let passes = 0;
+    while (improved && passes < 20) {
+        improved = false;
+        passes++;
 
-        // Assign each point to nearest centroid
         for (let i = 0; i < n; i++) {
-            let best = 0, bestD = Infinity;
-            for (let c = 0; c < k; c++) {
-                let d = 0;
-                for (let j = 0; j < dim; j++) d += (points[i][j] - ctrs[c][j]) ** 2;
-                if (d < bestD) { bestD = d; best = c; }
+            // Edge weight from i to each neighboring community (excluding self-loops)
+            const neighW = new Map();
+            for (const [j, w] of adj[i]) {
+                if (j === i) continue;
+                const C = community[j];
+                neighW.set(C, (neighW.get(C) || 0) + w);
             }
-            if (labels[i] !== best) { labels[i] = best; changed = true; }
-        }
 
-        if (!changed) break;
+            const oldC = community[i];
+            // Remove i from its current community before evaluating moves
+            sigmaTot[oldC] -= deg[i];
 
-        // Update centroids
-        const sums = Array.from({length: k}, () => new Array(dim).fill(0));
-        const cnts = new Array(k).fill(0);
-        for (let i = 0; i < n; i++) {
-            const c = labels[i];
-            for (let j = 0; j < dim; j++) sums[c][j] += points[i][j];
-            cnts[c]++;
-        }
-        for (let c = 0; c < k; c++) {
-            if (cnts[c] > 0)
-                for (let j = 0; j < dim; j++) ctrs[c][j] = sums[c][j] / cnts[c];
+            // Greedy: pick community with largest modularity gain
+            // ΔQ(i → C) ∝ k_{i,C} - γ · deg(i) · Σ_tot(C) / (2m)
+            // γ<1 favors larger communities, γ>1 favors smaller ones.
+            let bestC = oldC;
+            let bestGain = (neighW.get(oldC) || 0) - resolution * deg[i] * sigmaTot[oldC] / m2;
+
+            neighW.forEach((kiC, C) => {
+                if (C === oldC) return;
+                const gain = kiC - resolution * deg[i] * sigmaTot[C] / m2;
+                if (gain > bestGain) {
+                    bestGain = gain;
+                    bestC = C;
+                }
+            });
+
+            // Reinsert into chosen community
+            community[i] = bestC;
+            sigmaTot[bestC] += deg[i];
+
+            if (bestC !== oldC) improved = true;
         }
     }
 
+    // Relabel communities to 0..k-1 in order of first appearance
+    const remap = {};
+    let next = 0;
+    const labels = new Array(n);
+    for (let i = 0; i < n; i++) {
+        if (remap[community[i]] == null) remap[community[i]] = next++;
+        labels[i] = remap[community[i]];
+    }
     return labels;
+}
+
+/** Compute modularity Q = Σ_C [e_C/m - (a_C/2m)²] for reporting. */
+function computeModularity(adj, labels) {
+    const n = adj.length;
+    const deg = new Float64Array(n);
+    let sumDeg = 0;
+    for (let i = 0; i < n; i++) {
+        for (const [, w] of adj[i]) deg[i] += w;
+        sumDeg += deg[i];
+    }
+    const m2 = sumDeg;
+    if (m2 === 0) return 0;
+
+    const k = labels.length ? Math.max(...labels) + 1 : 0;
+    const eIn = new Float64Array(k);   // 2 × internal weight of community C
+    const aTot = new Float64Array(k);  // sum of degrees in community C
+
+    for (let i = 0; i < n; i++) {
+        aTot[labels[i]] += deg[i];
+        for (const [j, w] of adj[i]) {
+            if (labels[i] === labels[j]) eIn[labels[i]] += w;
+        }
+    }
+
+    let Q = 0;
+    for (let c = 0; c < k; c++) {
+        Q += (eIn[c] / m2) - (aTot[c] / m2) ** 2;
+    }
+    return Q;
 }
 
 // ─── Highlight / Reset ──────────────────────────────────────────────────────
