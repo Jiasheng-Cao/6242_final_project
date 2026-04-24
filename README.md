@@ -25,7 +25,9 @@ Step 2: Clean the dataset by using 'python clean_data.py'
    
 Step 3: Prepare visualization data by using 'python prepare_D3_graph_data.py'
 
-Step 4: Run visualization by run 'python -m http.server 8000' in your terminal and open 'd3_graph.html' in your 'http://localhost:8000' web browser.
+Step 4: Run 'python -m http.server 8000' in terminal
+
+Step 5: Open 'd3_graph.html' in 'http://localhost:8000' web browser
 
 
 DEMO VIDEO
