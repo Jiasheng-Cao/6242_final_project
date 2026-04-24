@@ -1,4 +1,3 @@
-======================
 DESCRIPTION
 ======================
 This project builds a dynamic citation network for Computer Science papers using the OpenAlex API and visualizes it with D3.js.
@@ -8,7 +7,6 @@ The system first collects citation data, then cleans and processes it into a gra
 The goal of this project is to help users better understand the growth of research areas and the role of individual papers in the citation network.
 
 
-======================
 INSTALLATION
 ======================
 1. Make sure you have Python 3 installed.
@@ -20,7 +18,6 @@ INSTALLATION
    The final output is an HTML file that runs in a browser.
 
 
-======================
 EXECUTION
 ======================
 Step 1: Collect raw data
