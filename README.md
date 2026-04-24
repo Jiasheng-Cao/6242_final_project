@@ -9,10 +9,9 @@ The goal of this project is to help users better understand the growth of resear
 
 INSTALLATION
 ======================
-1. Make sure you have Python 3 installed.
+1. Make sure have Python 3 installed.
 
-2. Install required Python packages (if needed):
-   pip install pandas numpy requests
+2. Install required Python packages
 
 3. The final output is an HTML file that runs in a browser.
 
