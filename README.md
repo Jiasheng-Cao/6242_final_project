@@ -19,22 +19,13 @@ INSTALLATION
 
 EXECUTION
 ======================
-Step 1: Collect raw data
-   'python build_init_data.py'
-   (You can change the dataset size by modifying TOTAL_PAPERS in the code.)
+Step 1: Collect raw data by using 'python build_init_data.py'. (You can change the dataset size by modifying TOTAL_PAPERS in the code.)
 
-
-Step 2: Clean the dataset
-   'python clean_data.py'
+Step 2: Clean the dataset by using 'python clean_data.py'
    
+Step 3: Prepare visualization data by using 'python prepare_D3_graph_data.py'
 
-Step 3: Prepare visualization data
-   'python prepare_D3_graph_data.py'
-
-
-Step 4: Run visualization
-   Run 'python -m http.server 8000' in your terminal.  
-   Open 'd3_graph.html' in your 'http://localhost:8000' web browser.
+Step 4: Run visualization by run 'python -m http.server 8000' in your terminal and open 'd3_graph.html' in your 'http://localhost:8000' web browser.
 
 
 DEMO VIDEO
