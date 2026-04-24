@@ -28,7 +28,3 @@ Step 4: Run 'python -m http.server 8000' in terminal
 
 Step 5: Open 'd3_graph.html' in 'http://localhost:8000' web browser
 
-
-DEMO VIDEO
-======================
-
