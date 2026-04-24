@@ -4,9 +4,7 @@ import time
 from tqdm import tqdm
 import random
 
-# ===============================
-# 配置
-# ===============================
+
 BASE_URL = "https://api.openalex.org/works"
 CS_CONCEPT = "C41008148"
 
@@ -17,15 +15,9 @@ HEADERS = {
     "User-Agent": "your_email@example.com"
 }
 
-# ===============================
-# 存储
-# ===============================
 all_data = []
 visited = set()
 
-# ===============================
-# 安全请求
-# ===============================
 def safe_request(url, params=None):
     try:
         res = requests.get(url, params=params, headers=HEADERS, timeout=10)
@@ -35,9 +27,6 @@ def safe_request(url, params=None):
         pass
     return None
 
-# ===============================
-# 抓取
-# ===============================
 print("Fetching OpenAlex CS papers...")
 
 cursor = "*"
@@ -45,17 +34,11 @@ count = 0
 
 pbar = tqdm(total=TOTAL_PAPERS)
 
-# ===============================
-# 主循环（cursor + 扩展）
-# ===============================
 while count < TOTAL_PAPERS:
 
-    # ===========================
-    # Step 1: cursor 抓（你原逻辑）
-    # ===========================
     params = {
         "filter": f"concepts.id:{CS_CONCEPT}",
-        "sort": "cited_by_count:desc",   # 🔥高引用优先
+        "sort": "cited_by_count:desc",
         "per-page": PER_PAGE,
         "cursor": cursor
     }
@@ -92,15 +75,10 @@ while count < TOTAL_PAPERS:
         count += 1
         pbar.update(1)
 
-    # ===========================
-    # Step 2: 🔥 扩展（核心新增）
-    # ===========================
-    if len(all_data) > 200:  # 数据够了再扩展
+    if len(all_data) > 200:
 
-        # 👉 按 citation 排序
         sorted_data = sorted(all_data, key=lambda x: x["citation_count"], reverse=True)
 
-        # 👉 80% 高引用 + 20% 随机
         top_candidates = sorted_data[:100]
         random_candidates = random.sample(sorted_data, min(30, len(sorted_data)))
 
@@ -111,12 +89,11 @@ while count < TOTAL_PAPERS:
         for paper in expand_candidates:
             refs = paper["references"]
 
-            for ref in refs[:3]:  # 🔥控制扩展量（关键）
+            for ref in refs[:3]:
                 if ref and ref not in visited:
                     new_ids.append(ref)
                     visited.add(ref)
 
-        # 👉 抓扩展论文（少量！）
         for ref_id in new_ids[:30]:
 
             if count >= TOTAL_PAPERS:
@@ -137,16 +114,12 @@ while count < TOTAL_PAPERS:
             count += 1
             pbar.update(1)
 
-            time.sleep(0.15)  # 🔥扩展慢一点
+            time.sleep(0.15)
 
-    # 原来的限速
     time.sleep(0.2)
 
 pbar.close()
 
-# ===============================
-# 保存
-# ===============================
 df = pd.DataFrame(all_data)
 df.to_csv("openalex_papers.csv", index=False)
 

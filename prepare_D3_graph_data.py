@@ -3,14 +3,12 @@ import json
 import math
 import random
 
-print("开始处理数据...")
 
 df = pd.read_csv("cleaned_openalex_papers.csv")
 nodes = []
 edges = []
 year_map = {}
 
-# ===== 1️⃣ 构建节点 =====
 for _, row in df.iterrows():
     pid = row["paper_id"]
     year = int(row["year"])
@@ -26,12 +24,11 @@ for _, row in df.iterrows():
         "id": pid,
         "title": title,
         "year": year,
-        "citation_count": int(row["citation_count"])  # 保留原始citation
+        "citation_count": int(row["citation_count"])
     })
 
 DECAY_RATE = 0.15
 
-# ===== 2️⃣ 构建边 =====
 for _, row in df.iterrows():
     source = row["paper_id"]
     source_year = year_map[source]
@@ -56,7 +53,7 @@ for _, row in df.iterrows():
                 "weight": round(decay_weight, 4)
             })
 
-# ===== ⭐ 3️⃣ 新增：计算 in-degree（只算真实引用） =====
+
 in_degree = {n["id"]: 0 for n in nodes}
 
 for e in edges:
@@ -65,11 +62,11 @@ for e in edges:
         if tgt in in_degree:
             in_degree[tgt] += 1
 
-# ===== ⭐ 4️⃣ 写回 nodes =====
+
 for n in nodes:
     n["in_degree"] = in_degree[n["id"]]
 
-# ===== 5️⃣ 冷启动预测（不参与 in-degree）=====
+
 cold_start_papers = [n["id"] for n in nodes if n["citation_count"] == 0]
 all_paper_ids = list(year_map.keys())
 
@@ -87,7 +84,7 @@ for new_paper in cold_start_papers:
                 "confidence": round(random.uniform(0.6, 0.95), 2) 
             })
 
-# ===== 6️⃣ 输出 =====
+
 graph = {
     "nodes": nodes,
     "links": edges
@@ -98,4 +95,4 @@ output_file = "graph_with_algorithms.json"
 with open(output_file, "w") as f:
     json.dump(graph, f)
 
-print(f"✅ 成功生成 {output_file}！包含 {len(nodes)} 个节点。")
+print(f"生成 {output_file}！包含 {len(nodes)} 个节点。")

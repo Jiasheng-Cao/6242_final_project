@@ -231,16 +231,14 @@ let nodeMap = {};
 let nodesByYear = {};
 let citationMap = {};
 
-// Hoisted so applyNodeColors() can reference them
 let colorScale;
 let sizeScale;
 
-// Cluster state
 let clusterMode = false;
-let clusterMap = {};       // nodeId -> cluster index
-let clusterOtherIdx = -1;  // label reserved for the "Other" (small-community) bucket; -1 if unused
-let activeClusterFilter = null;  // { cluster, maxYear, minYear } when inspector panel is open
-// Louvain may return any number of communities, so keep a big palette
+let clusterMap = {};
+let clusterOtherIdx = -1;
+let activeClusterFilter = null;
+
 const CLUSTER_COLORS = [...d3.schemeTableau10, ...d3.schemeSet3, ...d3.schemePaired];
 const OTHER_COLOR = "#cfd8dc";
 
@@ -256,18 +254,15 @@ svg.call(zoom);
 d3.json("graph_with_algorithms.json").then(data => {
     fullData = data;
 
-    // ⭐ 1. nodeMap（O(1)查节点）
     data.nodes.forEach(n => {
         nodeMap[n.id] = n;
     });
 
-    // ⭐ 2. nodesByYear（避免 filter）
     data.nodes.forEach(n => {
         if (!nodesByYear[n.year]) nodesByYear[n.year] = [];
         nodesByYear[n.year].push(n);
     });
 
-    // ⭐ 3. citationMap（避免扫 edges）
     data.links.forEach(l => {
         const target = typeof l.target === "object" ? l.target.id : l.target;
         citationMap[target] = (citationMap[target] || 0) + 1;
@@ -291,9 +286,7 @@ d3.json("graph_with_algorithms.json").then(data => {
     alert("Error loading JSON. Please make sure Python script generated graph_with_algorithms.json correctly.");
 });
 
-// Called by "Apply Filter" button. Cluster assignments are global (computed
-// on the full graph), so they survive year-filter and zoom changes — the
-// new visible subset just reads from the cached clusterMap.
+
 function updateGraph() {
     updateGraphWithZoom(currentZoom);
 }
@@ -442,7 +435,6 @@ function updateGraphWithZoom(k) {
     }
 }
 
-// Apply either cluster colors or citation-count colors to all nodes
 function applyNodeColors() {
     if (!nodeSelection) return;
     if (clusterMode) {
@@ -455,11 +447,9 @@ function applyNodeColors() {
     } else {
         nodeSelection.attr("fill", d => colorScale(d.citation_count));
     }
-    // If the cluster inspector is open, re-dim non-matching nodes on top of the fill
     if (activeClusterFilter) applyClusterFilter();
 }
 
-// ─── Community Detection (Louvain) ──────────────────────────────────────────
 
 function runClustering() {
     if (!nodeSelection || !linkSelection) return;
@@ -470,11 +460,8 @@ function runClustering() {
     statusEl.textContent = "Computing…";
     btn.disabled = true;
 
-    // Yield to browser to render "Computing…" before blocking
     setTimeout(() => {
         try {
-            // Cluster on the FULL graph (ignoring year filter and zoom-based
-            // node cap) so cluster colors stay stable as the user pans around.
             const allNodes = fullData.nodes;
             const allLinks = fullData.links.filter(d => d.type !== "predicted");
             const resolution = +document.getElementById("resolution").value;
@@ -510,20 +497,7 @@ function runClustering() {
     }, 10);
 }
 
-/**
- * Collapse communities smaller than minSize into a single "Other" bucket.
- * Main communities are relabeled 0..numMain-1 in descending order of size,
- * so colors are stable-ish across runs (largest group always gets color 0).
- *
- * Returns {
- *   labels:       new label per node (otherIdx for merged-small, else 0..numMain-1)
- *   numMain:      count of kept communities
- *   otherIdx:     label index used for the Other bucket, or -1 if none
- *   otherNodes:   total nodes that fell into Other
- *   otherGroups:  number of original communities that got merged in
- *   sizes:        array of main-community sizes [size0, size1, ...]
- * }
- */
+
 function postProcessCommunities(rawLabels, minSize) {
     const counts = new Map();
     rawLabels.forEach(l => counts.set(l, (counts.get(l) || 0) + 1));
@@ -583,7 +557,6 @@ function renderClusterLegend(processed) {
     }
     legend.innerHTML = html;
     legend.style.display = "block";
-    // Keep the active button highlighted if a cluster panel is already open
     if (activeClusterFilter) markActiveLegendButton(activeClusterFilter.cluster);
 }
 
@@ -594,7 +567,6 @@ function markActiveLegendButton(cluster) {
     if (cluster >= 0 && buttons[cluster]) buttons[cluster].classList.add("active");
 }
 
-// ─── Cluster Inspector Panel ────────────────────────────────────────────────
 
 function openClusterPanel(cluster) {
     if (!clusterMode) return;
@@ -671,7 +643,6 @@ function renderClusterPaperList() {
     const list = document.getElementById("clusterPaperList");
     if (!list) return;
 
-    // Cap rendered rows for performance; very large clusters still show top 500
     const CAP = 500;
     const shown = papers.slice(0, CAP);
     let html = shown.map(p => `
@@ -692,8 +663,6 @@ function renderClusterPaperList() {
     list.innerHTML = html;
 }
 
-// Dim everything outside the selected cluster / past the year cutoff.
-// Runs on top of applyNodeColors (which has set the base fill).
 function applyClusterFilter() {
     if (!nodeSelection || !linkSelection || !activeClusterFilter) return;
     const { cluster, currentYear } = activeClusterFilter;
@@ -722,16 +691,7 @@ function escapeHtml(s) {
         .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-/**
- * Louvain community detection (Blondel et al. 2008).
- * Hierarchical modularity optimization — picks the number of
- * communities automatically. Returns { labels, modularity } where
- * labels[i] is the community index of nodes[i] and communities are
- * relabeled 0..k-1 in order of first appearance.
- *
- * Multi-level: local optimization → aggregate into super-graph → repeat
- * until modularity stops improving.
- */
+
 function louvain(nodes, links, resolution = 1.0) {
     const n = nodes.length;
     if (n === 0) return { labels: [], modularity: 0 };
@@ -756,10 +716,7 @@ function louvain(nodes, links, resolution = 1.0) {
         baseAdj[b].set(a, w);
     });
 
-    // Isolated nodes (no edges) fall into their own singleton community.
-    // Louvain local optimization handles this automatically.
 
-    // Run hierarchical Louvain
     let partition = Array.from({length: n}, (_, i) => i);
     let currentAdj = baseAdj;
     let currentN = n;
@@ -768,13 +725,10 @@ function louvain(nodes, links, resolution = 1.0) {
         const labels = louvainLocal(currentN, currentAdj, resolution);
         const numC = labels.length ? Math.max(...labels) + 1 : 0;
 
-        // Propagate level-up labels to original nodes
         partition = partition.map(p => labels[p]);
 
-        // Stop if no merges happened at this level
         if (numC === currentN) break;
 
-        // Aggregate: communities become super-nodes
         const newAdj = Array.from({length: numC}, () => new Map());
         for (let i = 0; i < currentN; i++) {
             const ci = labels[i];
@@ -788,7 +742,6 @@ function louvain(nodes, links, resolution = 1.0) {
         currentN = numC;
     }
 
-    // Relabel communities to 0..k-1 in order of first appearance
     const remap = {};
     let next = 0;
     const finalLabels = partition.map(p => {
@@ -799,25 +752,19 @@ function louvain(nodes, links, resolution = 1.0) {
     return { labels: finalLabels, modularity: computeModularity(baseAdj, finalLabels) };
 }
 
-/**
- * One level of Louvain local optimization: greedy modularity maximization
- * by moving nodes between neighboring communities until no improvement.
- * Returns labels (0..k-1) for each node in the input graph.
- */
+
 function louvainLocal(n, adj, resolution = 1.0) {
     const community = new Int32Array(n);
     for (let i = 0; i < n; i++) community[i] = i;
 
-    // Weighted degree (self-loops, if present, contribute fully)
     const deg = new Float64Array(n);
     let sumDeg = 0;
     for (let i = 0; i < n; i++) {
         for (const [, w] of adj[i]) deg[i] += w;
         sumDeg += deg[i];
     }
-    const m2 = sumDeg;  // = 2m
+    const m2 = sumDeg;
     if (m2 === 0) {
-        // Fully disconnected: every node its own community → relabel
         const remap = {};
         let next = 0;
         return Array.from(community, c => {
@@ -826,7 +773,6 @@ function louvainLocal(n, adj, resolution = 1.0) {
         });
     }
 
-    // sigmaTot[C] = sum of weighted degrees of nodes currently in C
     const sigmaTot = new Float64Array(n);
     for (let i = 0; i < n; i++) sigmaTot[i] = deg[i];
 
@@ -837,7 +783,6 @@ function louvainLocal(n, adj, resolution = 1.0) {
         passes++;
 
         for (let i = 0; i < n; i++) {
-            // Edge weight from i to each neighboring community (excluding self-loops)
             const neighW = new Map();
             for (const [j, w] of adj[i]) {
                 if (j === i) continue;
@@ -846,12 +791,8 @@ function louvainLocal(n, adj, resolution = 1.0) {
             }
 
             const oldC = community[i];
-            // Remove i from its current community before evaluating moves
             sigmaTot[oldC] -= deg[i];
 
-            // Greedy: pick community with largest modularity gain
-            // ΔQ(i → C) ∝ k_{i,C} - γ · deg(i) · Σ_tot(C) / (2m)
-            // γ<1 favors larger communities, γ>1 favors smaller ones.
             let bestC = oldC;
             let bestGain = (neighW.get(oldC) || 0) - resolution * deg[i] * sigmaTot[oldC] / m2;
 
@@ -864,7 +805,6 @@ function louvainLocal(n, adj, resolution = 1.0) {
                 }
             });
 
-            // Reinsert into chosen community
             community[i] = bestC;
             sigmaTot[bestC] += deg[i];
 
@@ -872,7 +812,6 @@ function louvainLocal(n, adj, resolution = 1.0) {
         }
     }
 
-    // Relabel communities to 0..k-1 in order of first appearance
     const remap = {};
     let next = 0;
     const labels = new Array(n);
@@ -883,7 +822,6 @@ function louvainLocal(n, adj, resolution = 1.0) {
     return labels;
 }
 
-/** Compute modularity Q = Σ_C [e_C/m - (a_C/2m)²] for reporting. */
 function computeModularity(adj, labels) {
     const n = adj.length;
     const deg = new Float64Array(n);
@@ -896,8 +834,8 @@ function computeModularity(adj, labels) {
     if (m2 === 0) return 0;
 
     const k = labels.length ? Math.max(...labels) + 1 : 0;
-    const eIn = new Float64Array(k);   // 2 × internal weight of community C
-    const aTot = new Float64Array(k);  // sum of degrees in community C
+    const eIn = new Float64Array(k);
+    const aTot = new Float64Array(k);
 
     for (let i = 0; i < n; i++) {
         aTot[labels[i]] += deg[i];
@@ -913,7 +851,6 @@ function computeModularity(adj, labels) {
     return Q;
 }
 
-// ─── Highlight / Reset ──────────────────────────────────────────────────────
 
 function isConnected(a, b) {
     return linkedByIndex[`${a},${b}`] || linkedByIndex[`${b},${a}`] || a === b;
@@ -997,7 +934,6 @@ function updateSidePanel(node) {
 
     const yearStats = {};
 
-    // ⭐ 1. 统计“谁引用了这个node”
     fullData.links.forEach(l => {
         const target = l.target.id || l.target;
         const source = l.source.id || l.source;
@@ -1015,11 +951,10 @@ function updateSidePanel(node) {
                 };
             }
 
-            yearStats[y].citations += 1;  // ⭐ 每条引用算1次
+            yearStats[y].citations += 1;
         }
     });
 
-    // ⭐ 2. cluster统计（可选）
     fullData.nodes.forEach(n => {
         const y = n.year;
         if (!yearStats[y]) return;
@@ -1038,7 +973,6 @@ function updateSidePanel(node) {
 
     drawLineChart("#citationChart", citationData);
 
-    // ===== Cluster Timeline (Scrollable) =====
     let html = "";
 
     years.forEach(y => {
@@ -1046,23 +980,20 @@ function updateSidePanel(node) {
         const currentCluster = clusterMap[nodeId];
         if (currentCluster == null) return;
 
-        // ⭐ 只看“该年新论文”
         const newPapers = nodesByYear[y] || [];
 
-        // ⭐ 只保留该 cluster
         const clusterNodes = newPapers.filter(n =>
             clusterMap[n.id] === currentCluster
         );
 
         if (clusterNodes.length === 0) return;
 
-        // ⭐ 找 total internal citations 最大
         let maxNode = null;
         let maxCount = -1;
 
         clusterNodes.forEach(n => {
 
-            let count = citationMap[n.id] || 0;   // ⭐ O(1)
+            let count = citationMap[n.id] || 0;
 
             if (count > maxCount) {
                 maxCount = count;
