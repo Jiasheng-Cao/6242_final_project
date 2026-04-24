@@ -36,7 +36,6 @@ Step 4: Run visualization
 The visualization will show the citation network and allow interactive exploration.
 
 
-======================
 DEMO VIDEO (Optional)
 ======================
 [Add your unlisted YouTube link here if available]
